@@ -5,12 +5,13 @@ from fastapi import APIRouter
 from fastapi import HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt  # noqa
+from sqlalchemy.orm import Session
 
-from app.db import oauth2_scheme, database, users
-from app.main import pwd_context
-from app.models.token import TokenData
-from app.models.user import User, UserDetail, UserRegister
-from app.secrets import *
+from src.core.oauth import oauth2_scheme, pwd_context
+from src.core.secrets import ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
+from src.apps.models.token import TokenData
+from src.apps.models.user import User, UserRegister, UserDetail
+from src.core.db import users, get_database_session
 
 auth_router = APIRouter(prefix="/oauth")
 
@@ -34,7 +35,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Depends(get_database_session), ):
     credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -48,22 +49,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         token_data = TokenData(username=username)
     except JWTError:
         raise credentials_exception
-    user = get_user_or_none(database, username=token_data.username)
+    user = get_user_or_none(session, username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
 
 
-async def get_user_or_none(db, username: str):
+async def get_user_or_none(session: Session, username: str):
     query = users.select().where(users.c.username == username)
-    data = await db.fetch_one(query)
+    data = await session.fetch_one(query)
     if data:
         return User(**data)
     return None
 
 
-async def authenticate_user(database, username: str, password: str):
-    user = await get_user_or_none(database, username)
+async def authenticate_user(session: Session, username: str, password: str):
+    user = await get_user_or_none(session, username)
     if not user:
         return False
     if not verify_password(password, user.hashed_password):
@@ -82,15 +83,15 @@ async def get_users(current_user: User = Depends(get_current_active_user)):
 
 
 @auth_router.post("/register", response_model=User)
-async def register(user: UserRegister):
+async def register(user: UserRegister, session: Session = Depends(get_database_session)):
     query = users.insert().values(username=user.username, hashed_password=get_password_hash(user.hashed_password))
-    last_record_id = await database.execute(query)
+    last_record_id = await session.execute(query)
     return {**user.dict(), "id": last_record_id}
 
 
 @auth_router.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = await authenticate_user(database, form_data.username, form_data.password)
+async def login(session: Session = Depends(get_database_session), form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await authenticate_user(session, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
